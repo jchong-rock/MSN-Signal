@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 import hashlib
 import random
 import string
-from auth.locks import FakeRWLock as RWLock
+from readerwriterlock import rwlock
 from list_numbers import ListNumbers
 from auth.errors import *
 
@@ -12,12 +12,12 @@ class UserDatabase(ABC):
     def __init__(self):
         self.user_threads = {}
         self.switchboard = None
-        self.user_threads_lock = RWLock()
+        self.user_threads_lock = rwlock.RWLockFairD()
     def set_connection_for_user(self, connection, username):
-        with self.user_threads_lock.writer_lock():
+        with self.user_threads_lock.gen_wlock():
             self.user_threads[username] = connection
     def get_connection_for_user(self, username):
-        with self.user_threads_lock.reader_lock():
+        with self.user_threads_lock.gen_rlock():
             if username in self.user_threads:
                 return self.user_threads[username]
             return None
@@ -135,7 +135,7 @@ class MD5JSON(MD5UserDatabase):
     def __init__(self, json_file):
         super().__init__()
         self.json_file = json_file
-        self.lock = RWLock()
+        self.lock = rwlock.RWLockFairD()
         # read json
         with open(json_file, 'r') as f:
             self.database = json.load(f)
@@ -151,7 +151,7 @@ class MD5JSON(MD5UserDatabase):
         }
 
     def check_username(self, username):
-        with self.lock.reader_lock():
+        with self.lock.gen_rlock():
             return username in self.database
     
     def add_user(self, username, credentials, nickname=None):
@@ -159,10 +159,10 @@ class MD5JSON(MD5UserDatabase):
             nickname = username
         salt = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
         key = hashlib.md5(f"{credentials}{salt}".encode('utf-8')).hexdigest()
-        with self.lock.reader_lock():
+        with self.lock.gen_rlock():
             if self.check_username(username):
                 return False
-            with self.lock.writer_lock():
+            with self.lock.gen_wlock():
                 self.database[username] = {
                     "nickname": nickname,
                     "salt": salt, 
@@ -193,30 +193,30 @@ class MD5JSON(MD5UserDatabase):
         return True
     
     def remove_user(self, username):
-        with self.lock.reader_lock():
+        with self.lock.gen_rlock():
             if self.check_username(username):
-                with self.lock.writer_lock():
+                with self.lock.gen_wlock():
                     self.database.pop(username)
                     self.__write_back__()
                 return True
         return False
     
     def get_salt(self, username):
-        with self.lock.reader_lock():
+        with self.lock.gen_rlock():
             return self.database[username]['salt']
 
     def check_response(self, username, response):
-        with self.lock.reader_lock():
+        with self.lock.gen_rlock():
             return self.database[username]['key'].lower() == response.lower()
 
     def get_phone_number(self, username):
-        with self.lock.reader_lock():
+        with self.lock.gen_rlock():
             if 'phone' in self.database[username]:
                 return self.database[username]['phone']
             return None
 
     def set_phone_number(self, username, number):
-        with self.lock.writer_lock():
+        with self.lock.gen_wlock():
             if number is None:
                 self.database[username].pop('phone', None)
             else:
@@ -224,41 +224,41 @@ class MD5JSON(MD5UserDatabase):
             self.__write_back__()
 
     def get_group_names(self, username):
-        with self.lock.reader_lock():
+        with self.lock.gen_rlock():
             return self.database[username]['groups']
 
     def get_contacts(self, username):
-        with self.lock.reader_lock():
+        with self.lock.gen_rlock():
             return [self.get_contact_info(username, k) for k in self.database[username]['contacts']]
 
     def get_nickname(self, username):
-        with self.lock.reader_lock():
+        with self.lock.gen_rlock():
             return self.database[username]['nickname']
     
     def set_nickname(self, username, nickname):
-        with self.lock.writer_lock():
+        with self.lock.gen_wlock():
             self.database[username]['nickname'] = nickname
             self.__write_back__()
 
     def get_contact_info(self, username, contact_name):
-        with self.lock.reader_lock():
+        with self.lock.gen_rlock():
             return self.Contact(self.database[username]['contacts'][contact_name], contact_name, self.database[contact_name]['nickname']) 
 
     def get_contacts_from_list(self, username, list_pos):
-        with self.lock.reader_lock():
+        with self.lock.gen_rlock():
             return [self.get_contact_info(username, k) for k in self.database[username]["lists"][list_pos]]
 
     def new_group(self, username, groupname):
-        with self.lock.reader_lock():
+        with self.lock.gen_rlock():
             if groupname not in self.database[username]['groups']:
-                with self.lock.writer_lock():
+                with self.lock.gen_wlock():
                     self.database[username]['groups'].append([groupname])
                     self.__write_back__()
                 return len(self.database[username]['groups']) - 1
             return None
     
     def add_contact_to_list(self, username, contact_name, list_num):
-        with self.lock.reader_lock():
+        with self.lock.gen_rlock():
             if contact_name in self.database:
                 if contact_name in self.database[username]['lists'][list_num]:
                     return USER_ALREADY_IN_LIST
@@ -266,7 +266,7 @@ class MD5JSON(MD5UserDatabase):
                     return USER_IN_ALLOW_AND_BLOCK
                 if list_num == ListNumbers.BLOCK_LIST and contact_name in self.database[username]['lists'][ListNumbers.ALLOW_LIST]:
                     return USER_IN_ALLOW_AND_BLOCK
-                with self.lock.writer_lock():
+                with self.lock.gen_wlock():
                     if contact_name not in self.get_contacts(username):
                         self.database[username]['contacts'][contact_name] = self.__get_defaults__(contact_name)
                     self.database[username]['lists'][list_num].append(contact_name)
@@ -281,11 +281,11 @@ class MD5JSON(MD5UserDatabase):
         return NONEXISTENT_EMAIL
 
     def remove_contact_from_list(self, username, contact_name, list_num):
-        with self.lock.reader_lock():
+        with self.lock.gen_rlock():
             if contact_name in self.database:
                 if contact_name not in self.database[username]['lists'][list_num]:
                     return USER_NOT_IN_LIST
-                with self.lock.writer_lock():
+                with self.lock.gen_wlock():
                     self.database[username]['lists'][list_num].remove(contact_name)
                     self.__write_back__()
                 if list_num == ListNumbers.FORWARD_LIST:
@@ -294,10 +294,10 @@ class MD5JSON(MD5UserDatabase):
         return NONEXISTENT_EMAIL     
 
     def add_to_group(self, username, groupnum, contact):
-        with self.lock.reader_lock():
+        with self.lock.gen_rlock():
             if groupnum < len(self.database[username]['groups']):
                 if contact in self.get_contacts(username):
-                    with self.lock.writer_lock():
+                    with self.lock.gen_wlock():
                         self.database[username]['contacts'][contact]['groups'].append(groupnum)
                         self.__write_back__()
                     return True
@@ -306,19 +306,19 @@ class MD5JSON(MD5UserDatabase):
     def del_group(self, username, groupnum):
         if groupnum == 0:
             return False
-        with self.lock.reader_lock():
+        with self.lock.gen_rlock():
             if groupnum < len(self.database[username]['groups']):
-                with self.lock.writer_lock():
+                with self.lock.gen_wlock():
                     self.database[username]['groups'].pop(groupnum)
                     self.__write_back__()
                 return True
         return False
 
     def remove_from_group(self, username, groupnum, contact):
-        with self.lock.reader_lock():
+        with self.lock.gen_rlock():
             if groupnum < len(self.database[username]['groups']):
                 if contact in self.get_contacts(username):
-                    with self.lock.writer_lock():
+                    with self.lock.gen_wlock():
                         self.database[username]['contacts'][contact]['groups'].remove(groupnum)
                         self.__write_back__()
                     return True
@@ -328,7 +328,7 @@ class MD5JSON(MD5UserDatabase):
         # O(n): do not use when possible
         # this is why an SQL implementation would be better
         users = []
-        with self.lock.reader_lock():
+        with self.lock.gen_rlock():
             for user in self.database:
                 if user['phone'] == number:
                     users.append(user)
